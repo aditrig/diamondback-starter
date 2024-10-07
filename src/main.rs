@@ -538,7 +538,6 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         let mut ins: Vec<Instr> = Vec::new();
         ins
     }
-        g
     }
 }
 
