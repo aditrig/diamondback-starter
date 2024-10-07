@@ -11,6 +11,9 @@ use im::HashMap;
 
 #[derive(PartialEq)]
 #[derive(Clone)]
+
+// ADDED: type int and bool 
+
 enum Type {
     Int,
     Bool,
@@ -23,17 +26,22 @@ enum Val {
     RegOffset(Reg, i32),
 }
 
-// ADDED: extra register
+// ADDED: extra registers for function args
 #[derive(Debug)]
 enum Reg {
     RAX,
     RSP,
     RBX,
     RDI,
+    RSI,
+    RDX,
+    RCX,
+    R8,
+    R9,
+
 }
 
-// ADDED: added more enums for diff assembly instrs
-// need to add jump and stuff for like if/else  
+// ADDED: added more enums for call and ret
 #[derive(Debug)]
 enum Instr {
     IMov(Val, Val),
@@ -51,12 +59,34 @@ enum Instr {
     Jo(String),
     Je(String),
     Label(String),
+    Call(String),
+    Ret,
+
 
 }
+// ADDED: print
 
-enum Op1 { Add1, Sub1 }
+enum Op1 { Add1, Sub1, Print}
 
 enum Op2 { Plus, Minus, Times, Equal, Greater, GreaterEqual, Less, LessEqual, }
+
+// ADDED: struct for function defn
+
+struct Defn {
+    name: String,
+    params: Vec<(String, Type)>, // (parameter name, type)
+    return_type: Type,
+    body: Expr,
+}
+
+// ADDED: struct for program defn 
+
+struct Prog {
+    functions: Vec<Defn>,
+    main_expr: Expr,
+}
+
+// ADDED: function call
 
 enum Expr {
     Input,
@@ -70,6 +100,11 @@ enum Expr {
     RepeatUntil(Box<Expr>, Box<Expr>),
     Set(String, Box<Expr>),
     Block(Vec<Expr>),
+    FunCall {
+        name: String,
+        args: Vec<Expr>, // arguments to the function call
+    },
+
 }
 
 fn is_reserved_word(s: &str) -> bool {
@@ -83,6 +118,18 @@ fn is_reserved_word(s: &str) -> bool {
     reserved_words.insert("input");
     reserved_words.contains(s)
 }
+
+// check for duplicates in function parameter list
+fn check_duplicates(params: &Vec<(String, Type)>) {
+    let mut seen = HashSet::new();
+    for (name, _) in params {
+        if seen.contains(name) {
+            eprintln!("Duplicate parameter name: {}", name);
+        }
+        seen.insert(name.clone());
+    }
+}
+
 
 fn parse_bind(b: &Sexp, body: &Sexp) -> Expr {
     let mut bindings: Vec<(String, Expr)> = Vec::new();
@@ -110,7 +157,6 @@ fn parse_bind(b: &Sexp, body: &Sexp) -> Expr {
     }
 }
 
-//ADDED: function for parsing if then else statements
 fn parse_conditional(conditional:&Sexp, then_branch:&Sexp, else_branch:&Sexp) -> Expr {
     let condition = Box::new(parse_expr(conditional));
     let then_expr = Box::new(parse_expr(then_branch));
@@ -125,6 +171,51 @@ fn parse_set(name : &String, body : &Sexp) -> Expr{
     Expr::Set(name.to_string(), body)
 }
 
+//ADDED: function for parsing types
+fn parse_type(s: &Sexp) -> Type {
+    match s {
+        Sexp::Atom(S(t)) if t == "int" => Type::Int,
+        Sexp::Atom(S(t)) if t == "bool" => Type::Bool,
+        _ => panic!("Unknown type"),
+    }
+}
+
+//ADDED: function for parsing function definitions
+fn parse_defn(s: &Sexp) -> Defn {
+    match s {
+        Sexp::List(vec) => match &vec[..] {
+            [Sexp::Atom(S(fun)), Sexp::Atom(S(name)), Sexp::List(params), return_type, body] if fun == "fun" => {
+                let param_list: Vec<(String, Type)> = params
+                    .iter()
+                    .map(|param| match param {
+                        Sexp::List(vec) => match &vec[..] {
+                            [Sexp::Atom(S(param_name)), param_type] => {
+                                (param_name.clone(), parse_type(param_type))
+                            }
+                            _ => panic!("Invalid parameter format"),
+                        },
+                        _ => panic!("Invalid parameter format"),
+                    })
+                    .collect();
+
+                check_duplicates(&param_list); // Check for duplicate parameters
+                let ret_type = parse_type(return_type);
+                let expr_body = parse_expr(body);
+
+                Defn {
+                    name: name.clone(),
+                    params: param_list,
+                    return_type: ret_type,
+                    body: expr_body,
+                }
+            }
+            _ => panic!("Invalid function definition"),
+        },
+        _ => panic!("Invalid function syntax"),
+    }
+}
+
+
 // ADDED: parsing booleans and if else statements
 fn parse_expr(s: &Sexp) -> Expr {
     match s {
@@ -135,7 +226,7 @@ fn parse_expr(s: &Sexp) -> Expr {
 
         Sexp::Atom(S(s)) if s == "true" => Expr::Boolean(true),
         Sexp::Atom(S(s)) if s == "false" => Expr::Boolean(false),
-
+        
         // Handle only strings that aren't booleans
         Sexp::Atom(S(s)) => if s == "input" {Expr::Input} else {Expr::Id(s.to_string())},
 
@@ -163,6 +254,15 @@ fn parse_expr(s: &Sexp) -> Expr {
                         if exprs.is_empty() {panic!("Block must have at least one expression");} 
                         Expr::Block(exprs.iter().map(parse_expr).collect())
                     },
+
+                //ADDED: parsing a function call
+                [Sexp::Atom(S(fun_name)), exprs @ ..] => {
+                        Expr::FunCall {
+                            name: fun_name.clone(),
+                            args: exprs.iter().map(parse_expr).collect(),
+                        }
+                }
+        
                 _ => panic!("invalid parse sequence"),
             }
         },
@@ -190,6 +290,7 @@ fn allocate_space(name: &str, allocs: &mut HashMap<String, i32>) -> i32{
 fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mut i32) -> Vec<Instr> {
   match e {
       Expr::Number(n) => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(*n))],
+
       // if b is true, b=1 else b=0 
       Expr::Boolean(b) => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(if *b { 1} else { 0 }))],
       Expr::Input => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Reg(Reg::RDI))],
@@ -210,6 +311,18 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
           ins.push(Instr::Jo("error".to_string()));
           ins
       },
+      //ADDED: starting implementing print
+      // FIX: i don't know if we are supposed to call snek_print or some other function
+      // on piazza: 
+      // The behavior of the print statement will depend on the type of its argument, so you'll need to find a way for typechecking to impact code generation.
+
+      Expr::UnOp(Op1::Print, e) => {
+        let mut ins = compile_to_instrs(e, allocs, label_idx); 
+        ins.push(Instr::IMov(Val::Reg(Reg::RDI), Val::Reg(Reg::RAX))); 
+        ins.push(Instr::Call("snek_print".to_string())); 
+        ins
+    }
+    
       Expr::BinOp(Op2::Plus, l, r) => {
           let mut ins = compile_to_instrs(l, allocs,label_idx);
           let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
@@ -385,10 +498,19 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         // ins.push(Instr::Label(end_label)); // i don't think this is needed
         ins
     }
-  }
+    Expr::FunCall { name, args } => {
+        let mut ins = Vec::new();
+        ins
+
+    }
+
+
+
+    //ADDED: function call handling
+}
 }
 
-// ADDED: rbx to string
+// ADDED: more registers to strings
 fn val_to_str(v: &Val) -> String {
   match v {
       Val::Imm(n) => n.to_string(),
@@ -396,13 +518,17 @@ fn val_to_str(v: &Val) -> String {
       Val::Reg(Reg::RSP) => "rsp".to_string(),
       Val::Reg(Reg::RBX) => "rbx".to_string(),
       Val::Reg(Reg::RDI) => "rdi".to_string(),
+      Val::Reg(Reg::RSI) => "rdi".to_string(),
+      Val::Reg(Reg::RDX) => "rdi".to_string(),
+      Val::Reg(Reg::RCX) => "rdi".to_string(),
+      Val::Reg(Reg::R8) => "rdi".to_string(),
+      Val::Reg(Reg::R9) => "rdi".to_string(),
 
       Val::RegOffset(Reg::RSP, n) => format!("[rsp{n}]"),
       _ => panic!("not yet implemented"),
   }
 }
 
-// ADDED: intrs to strings for new instrs
 fn instr_to_stri(i: &Instr) -> String {
   match i {
       Instr::IMov(a, b) => {
@@ -461,7 +587,10 @@ fn instr_to_stri(i: &Instr) -> String {
       Instr::Jne(label) => format!("jne {}", label),
       Instr::Jo(label) => format!("jo {}", label),
       Instr::Je(label) => format!("je {label}"),
+      // ADDED: intrs to strings call and ret
 
+      Instr::Call(name) => format!("call {}", name),
+      Instr::Ret => "ret".to_string(),
 
   }
 }
@@ -585,7 +714,8 @@ fn typecheck(e: &Expr, ctx:&HashMap<String, Type>) -> Type {
         }
         typecheck(body, ctx)
     }
-    //ADDED curly bracket
+    // FIX: type check for function calls
+    Expr::FunCall { name, args } => todo!(),
   }
 }
 
@@ -599,6 +729,7 @@ fn main() -> std::io::Result<()> {
     let mut in_file = File::open(in_name)?;
     let mut in_contents = String::new();
     in_file.read_to_string(&mut in_contents)?;
+    
 
     let expr = parse_expr(&parse(&in_contents).unwrap());
     let ctx: HashMap<String, Type> = HashMap::new(); 
