@@ -659,9 +659,9 @@ fn compile(prog: &Prog) -> String {
   let mut label_index = 0;
   let instructions: Vec<Instr> = compile_to_instrs(e, &mut allocations, &mut label_index);
   // compile function definitions
-  instructions.extend(compile_defns(&prog.functions, &mut allocations, label_index));
+  instructions.extend(compile_defns(&prog.functions, &mut allocations, &mut label_index));
   // compile main instructions 
-  instructions.extend(compile_to_instrs(&prog.main_expr, &mut allocations, label_index));
+  instructions.extend(compile_to_instrs(&prog.main_expr, &mut allocations, &mut label_index));
 
   let assembly: Vec<String> = instructions.iter().map(|x| instr_to_stri(x)).collect();
   assembly.join("\n")
