@@ -130,7 +130,6 @@ fn check_duplicates(params: &Vec<(String, Type)>) {
     }
 }
 
-
 fn parse_bind(b: &Sexp, body: &Sexp) -> Expr {
     let mut bindings: Vec<(String, Expr)> = Vec::new();
     let mut scope: HashSet<&str> = HashSet::new();
@@ -212,6 +211,41 @@ fn parse_defn(s: &Sexp) -> Defn {
             _ => panic!("Invalid function definition"),
         },
         _ => panic!("Invalid function syntax"),
+    }
+}
+
+fn parse_prog(s: &Sexp) -> Prog {
+    match s {
+        Sexp::List(exprs) => {
+            let mut functions = Vec::new();
+            let mut main_expr: Option<Expr> = None;
+
+            for expr in exprs.iter() {
+                match expr {
+                    Sexp::List(list) => {
+                        match &list[..] {
+                            [Sexp::Atom(S(fun)), Sexp::Atom(S(name)), Sexp::List(params), return_type, body] if fun == "fun" => {
+                                functions.push(parse_defn(expr));
+                            }
+                            _ => {
+                                if main_expr.is_none() {
+                                    main_expr = Some(parse_expr(expr));
+                                } else {
+                                    panic!("Multiple main expressions found");
+                                }
+                            }
+                        }
+                    }
+                    _ => panic!("Invalid program structure"),
+                }
+            }
+
+            Prog {
+                functions,
+                main_expr: main_expr.expect("Program must have a main expression"),
+            }
+        },
+        _ => panic!("Invalid program syntax"),
     }
 }
 
@@ -498,17 +532,41 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         // ins.push(Instr::Label(end_label)); // i don't think this is needed
         ins
     }
+        //ADDED: function call handling
+
     Expr::FunCall { name, args } => {
-        let mut ins = Vec::new();
+        let mut ins: Vec<Instr> = Vec::new();
         ins
-
     }
-
-
-
-    //ADDED: function call handling
+        g
+    }
 }
+
+fn compile_defns(defns: &[Defn], allocs: &mut HashMap<String, i32>, label_idx: &mut i32) -> Vec<Instr> {
+    let mut ins = Vec::new();
+    for defn in defns {
+        // Set up function label
+        ins.push(Instr::Label(defn.name.clone()));
+
+        // Set up frame pointer (prologue)
+        ins.push(Instr::IMov(Val::Reg(Reg::RSP), Val::Reg(Reg::RSP)));
+
+        // Allocate space for parameters
+        for (i, (param_name, _)) in defn.params.iter().enumerate() {
+            let offset = allocate_space(param_name, allocs);
+            ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset), Val::Reg(Reg::RDI))); // RDI as example
+        }
+
+        // Compile the body of the function
+        ins.extend(compile_to_instrs(&defn.body, allocs, label_idx));
+
+        // Restore frame pointer (epilogue) and return
+        ins.push(Instr::IMov(Val::Reg(Reg::RSP), Val::Reg(Reg::RSP)));
+        ins.push(Instr::Ret);
+    }
+    ins
 }
+
 
 // ADDED: more registers to strings
 fn val_to_str(v: &Val) -> String {
@@ -596,10 +654,16 @@ fn instr_to_stri(i: &Instr) -> String {
 }
 
 
-fn compile(e: &Expr) -> String {
+
+fn compile(prog: &Prog) -> String {
   let mut allocations: HashMap<String, i32> = HashMap::new();
   let mut label_index = 0;
   let instructions: Vec<Instr> = compile_to_instrs(e, &mut allocations, &mut label_index);
+  // compile function definitions
+  instructions.extend(compile_defns(&prog.functions, &mut allocations, label_index));
+  // compile main instructions 
+  instructions.extend(compile_to_instrs(&prog.main_expr, &mut allocations, label_index));
+
   let assembly: Vec<String> = instructions.iter().map(|x| instr_to_stri(x)).collect();
   assembly.join("\n")
 }
@@ -731,11 +795,12 @@ fn main() -> std::io::Result<()> {
     in_file.read_to_string(&mut in_contents)?;
     
 
-    let expr = parse_expr(&parse(&in_contents).unwrap());
+    let expr = parse_prog(&parse(&in_contents).unwrap());
     let ctx: HashMap<String, Type> = HashMap::new(); 
-    let expr_type = typecheck(&expr, &ctx);
+    let mut label_idx = 0; 
     let result = compile(&expr);
-    let type_flag = if expr_type == Type::Int {0} else {1};
+
+    //let type_flag = if expr_type == Type::Int {0} else {1};
     let asm_program = format!(
         "
 section .text
