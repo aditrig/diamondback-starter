@@ -1,4 +1,5 @@
 use std::env;
+use std::fmt::format;
 use std::fs::File;
 use std::io::prelude::*;
 use std::collections::HashSet;
@@ -36,12 +37,13 @@ enum Reg {
     RSI,
     RDX,
     RCX,
+    RBP,
     R8,
     R9,
 
 }
 
-// ADDED: added more enums for call and ret
+// ADDED: added more enums for call and ret ADDED: push and pop
 #[derive(Debug)]
 enum Instr {
     IMov(Val, Val),
@@ -60,6 +62,8 @@ enum Instr {
     Je(String),
     Label(String),
     Call(String),
+    Push(Val),
+    Pop(Val),
     Ret,
 
 
@@ -127,6 +131,15 @@ fn check_duplicates(params: &Vec<(String, Type)>) {
             eprintln!("Duplicate parameter name: {}", name);
         }
         seen.insert(name.clone());
+    }
+}
+fn check_duplicates_function_names(functs: &Vec<Defn>) {
+    let mut seen = HashSet::new();
+    for funct in functs.iter() {
+        if seen.contains(&funct.name) {
+            eprintln!("Duplicate parameter name: {}", &funct.name);
+        }
+        seen.insert(funct.name.clone());
     }
 }
 
@@ -239,6 +252,7 @@ fn parse_prog(s: &Sexp) -> Prog {
                     _ => panic!("Invalid program structure"),
                 }
             }
+            check_duplicates_function_names(&functions);
 
             Prog {
                 functions,
@@ -269,6 +283,7 @@ fn parse_expr(s: &Sexp) -> Expr {
             match &vec[..] {
                 [Sexp::Atom(S(op)), s] if op == "add1" => Expr::UnOp(Op1::Add1, Box::new(parse_expr(s))),
                 [Sexp::Atom(S(op)), s] if op == "sub1" => Expr::UnOp(Op1::Sub1, Box::new(parse_expr(s))),
+                [Sexp::Atom(S(op)), s] if op == "print" => Expr::UnOp(Op1::Print, Box::new(parse_expr(s))),
 
                 [Sexp::Atom(S(op)), bindings, body] if op == "let" => parse_bind(bindings, body),
                 [Sexp::Atom(S(op)), conditional, then_branch, else_branch] if op == "if" => parse_conditional(conditional, then_branch, else_branch),
@@ -305,8 +320,8 @@ fn parse_expr(s: &Sexp) -> Expr {
 
 fn find_max_offset(allocs: &HashMap<String, i32>) -> i32{
   let mut max_offset = 0;
-  for (_, offset) in allocs.into_iter() {
-     if offset < &max_offset {
+  for (name, offset) in allocs.into_iter() {
+     if offset < &max_offset && !name.ends_with("LOCAL_VAR") {
           max_offset = *offset;
      }
   }
@@ -321,7 +336,7 @@ fn allocate_space(name: &str, allocs: &mut HashMap<String, i32>) -> i32{
 }
 
 // ADDED: binops for > < >= <= =, and if case
-fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mut i32) -> Vec<Instr> {
+fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mut i32, functs: &Vec<Defn>, ctx:&HashMap<String, Type>) -> Vec<Instr> {
   match e {
       Expr::Number(n) => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(*n))],
 
@@ -329,18 +344,26 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
       Expr::Boolean(b) => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(if *b { 1} else { 0 }))],
       Expr::Input => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Reg(Reg::RDI))],
       Expr::Id(name) => match allocs.get(name) {
-            Some(&offset) => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset))],
-            None => panic!("Unbound variable identifier {name}")
+            Some(&offset) =>  vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset))],
+            None => {
+                let mut clone = name.clone();
+                clone.push_str("LOCAL_VAR");
+                match allocs.get(&clone) {
+                    Some(&offset) =>  vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, offset*8))],
+                    None => panic!("Unbound variable identifier {name}")
+                }
+            }
+            
         },
       
       Expr::UnOp(Op1::Add1, e_) => {
-          let mut ins = compile_to_instrs(e_, allocs,label_idx);
+          let mut ins = compile_to_instrs(e_, allocs,label_idx, functs, ctx);
           ins.push(Instr::IAdd(Val::Reg(Reg::RAX), Val::Imm(1)));
           ins.push(Instr::Jo("error".to_string()));
           ins
       },
       Expr::UnOp(Op1::Sub1, e_) => {
-          let mut ins = compile_to_instrs(e_, allocs,label_idx);
+          let mut ins = compile_to_instrs(e_, allocs,label_idx, functs, ctx);
           ins.push(Instr::ISub(Val::Reg(Reg::RAX), Val::Imm(1)));
           ins.push(Instr::Jo("error".to_string()));
           ins
@@ -351,35 +374,38 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
       // The behavior of the print statement will depend on the type of its argument, so you'll need to find a way for typechecking to impact code generation.
 
       Expr::UnOp(Op1::Print, e) => {
-        let mut ins = compile_to_instrs(e, allocs, label_idx); 
+        let type_e = typecheck(e, functs, ctx);
+        let type_flag = if type_e == Type::Int {0} else {1};
+        let mut ins = compile_to_instrs(e, allocs, label_idx, functs, ctx); 
         ins.push(Instr::IMov(Val::Reg(Reg::RDI), Val::Reg(Reg::RAX))); 
+        ins.push(Instr::IMov(Val::Reg(Reg::RSI), Val::Imm(type_flag))); 
         ins.push(Instr::Call("snek_print".to_string())); 
         ins
-    }
+        },
     
       Expr::BinOp(Op2::Plus, l, r) => {
-          let mut ins = compile_to_instrs(l, allocs,label_idx);
+          let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
           let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
           ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
-          ins.extend(compile_to_instrs(r, allocs,label_idx));
+          ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
           ins.push(Instr::IAdd(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
           ins.push(Instr::Jo("error".to_string()));
           ins
       },
       Expr::BinOp(Op2::Minus, l, r) => {
-          let mut ins = compile_to_instrs(r, allocs,label_idx);
+          let mut ins = compile_to_instrs(r, allocs,label_idx, functs, ctx);
           let offset_right = allocate_space(&format!("temp{}", allocs.len()), allocs);
           ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_right), Val::Reg(Reg::RAX)));
-          ins.extend(compile_to_instrs(l, allocs,label_idx));
+          ins.extend(compile_to_instrs(l, allocs,label_idx, functs, ctx));
           ins.push(Instr::ISub(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_right)));
           ins.push(Instr::Jo("error".to_string()));
           ins
       },
       Expr::BinOp(Op2::Times, l, r) => {
-          let mut ins = compile_to_instrs(l, allocs,label_idx);
+          let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
           let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
           ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
-          ins.extend(compile_to_instrs(r, allocs,label_idx));
+          ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
           ins.push(Instr::IMul(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
           ins.push(Instr::Jo("error".to_string()));
           ins
@@ -389,22 +415,22 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         let mut ins: Vec<Instr> = Vec::new();
         for (name, e) in bindings {
             if is_reserved_word(name) {panic!("trying to bind reserved variable name: {name}")}
-            ins.extend(compile_to_instrs(e, allocs,label_idx));
+            ins.extend(compile_to_instrs(e, allocs,label_idx, functs, ctx));
             keys.push(name.to_string());
             let offset = allocate_space(name, allocs);
             ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset), Val::Reg(Reg::RAX)));
         }
-        ins.extend(compile_to_instrs(body, allocs,label_idx));
+        ins.extend(compile_to_instrs(body, allocs,label_idx, functs, ctx));
         for key in keys {
             allocs.remove(&key);
         }
         ins
     },
       Expr::BinOp(Op2::Equal, l, r) => {
-        let mut ins = compile_to_instrs(l, allocs,label_idx);
+        let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
         ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
-        ins.extend(compile_to_instrs(r, allocs,label_idx));
+        ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
         ins.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   //set rax to 0 (false)
@@ -413,10 +439,10 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     },
 
     Expr::BinOp(Op2::Less, l, r) => {
-        let mut ins = compile_to_instrs(l, allocs,label_idx);
+        let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
         ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
-        ins.extend(compile_to_instrs(r, allocs,label_idx));
+        ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
         ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   //set rax to 0 (false)
@@ -426,10 +452,10 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     },
 
     Expr::BinOp(Op2::Greater, l, r) => {
-        let mut ins = compile_to_instrs(l, allocs,label_idx);
+        let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
         ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
-        ins.extend(compile_to_instrs(r, allocs,label_idx));
+        ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
         ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   //set rax to 0 (false)
@@ -438,10 +464,10 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     },
 
     Expr::BinOp(Op2::LessEqual, l, r) => {
-        let mut ins = compile_to_instrs(l, allocs,label_idx);
+        let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
         ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
-        ins.extend(compile_to_instrs(r, allocs,label_idx));
+        ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
         ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   // set rax to 0 (false)
@@ -450,10 +476,10 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     },
     
     Expr::BinOp(Op2::GreaterEqual, l, r) => {
-        let mut ins = compile_to_instrs(l, allocs,label_idx);
+        let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
         ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
-        ins.extend(compile_to_instrs(r, allocs,label_idx));
+        ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
         ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   // set rax to 0 (false)
@@ -464,13 +490,13 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     Expr::Block(exprs) => {
         let mut ins: Vec<Instr> = Vec::new();
         for e in exprs {
-            ins.extend(compile_to_instrs(e, allocs,label_idx));
+            ins.extend(compile_to_instrs(e, allocs,label_idx, functs, ctx));
         }
         ins
     },
     
     Expr::If(cond, then_branch, else_branch) => {
-        let mut ins = compile_to_instrs(cond, allocs, label_idx); 
+        let mut ins = compile_to_instrs(cond, allocs, label_idx, functs, ctx); 
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs); 
         ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX))); 
         // ins.extend(compile_to_instrs(then_branch, allocs, label_idx)); 
@@ -483,12 +509,12 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         ins.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::Imm(0)));
         ins.push(Instr::Je(else_label.clone())); 
     
-        ins.extend(compile_to_instrs(then_branch, allocs,label_idx)); 
+        ins.extend(compile_to_instrs(then_branch, allocs,label_idx, functs, ctx)); 
         ins.push(Instr::Jmp(end_label.clone()));
     
         // else label
         ins.push(Instr::Label(else_label));
-        ins.extend(compile_to_instrs(else_branch, allocs,label_idx)); 
+        ins.extend(compile_to_instrs(else_branch, allocs,label_idx, functs, ctx)); 
     
         // end label
         ins.push(Instr::Label(end_label));
@@ -498,7 +524,7 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
 
       Expr::Set(name, body) => {
             if !(allocs.contains_key(name)) {panic!("trying to bind undeclared variable {name}")}
-            let mut ins = compile_to_instrs(body, allocs,label_idx); 
+            let mut ins = compile_to_instrs(body, allocs,label_idx, functs, ctx); 
             let offset = allocs.get(name).unwrap();
             ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, *offset), Val::Reg(Reg::RAX)));
             ins
@@ -515,11 +541,11 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         // loop0:
         ins.push(Instr::Label(loop_label.clone()));
         // {e}
-        ins.extend(compile_to_instrs(body, allocs,label_idx)); 
+        ins.extend(compile_to_instrs(body, allocs,label_idx, functs, ctx)); 
         // move the updated values into rsp
         ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX))); 
         // {condition}
-        ins.extend(compile_to_instrs(condition, allocs,label_idx)); 
+        ins.extend(compile_to_instrs(condition, allocs,label_idx, functs, ctx)); 
         // compare rax (the condition) with the current value
         // ins.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
         // check if condition is true by comparing rax to 1
@@ -531,43 +557,62 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         // add the end label to the end of the loop - idk if this is needed
         // ins.push(Instr::Label(end_label)); // i don't think this is needed
         ins
-    }
+    },
         //ADDED: function call handling
 
     Expr::FunCall { name, args } => {
         let mut ins: Vec<Instr> = Vec::new();
+        for arg in args.iter().rev() {
+            ins.extend(compile_to_instrs(arg, allocs, label_idx, functs, ctx));
+            ins.push(Instr::Push(Val::Reg(Reg::RAX))); // save previous caller's rbp
+        }
+        ins.push(Instr::Call(name.to_string()));
+        ins.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm((8*args.len()) as i32)));
         ins
     }
     }
 }
 
-fn compile_defns(defns: &[Defn], allocs: &mut HashMap<String, i32>, label_idx: &mut i32) -> Vec<Instr> {
+fn compile_defns(defns: &[Defn], allocs: &mut HashMap<String, i32>, label_idx: &mut i32, functs: &Vec<Defn>, ctx:&HashMap<String, Type>) -> Vec<Instr> {
     let mut ins = Vec::new();
     for defn in defns {
+        // ADDED changes to stack based approach instead of allocating in heap
         // Set up function label
         ins.push(Instr::Label(defn.name.clone()));
 
         // Set up frame pointer (prologue)
-        ins.push(Instr::IMov(Val::Reg(Reg::RSP), Val::Reg(Reg::RSP)));
+        ins.push(Instr::Push(Val::Reg(Reg::RBP))); // save previous caller's rbp
+        ins.push(Instr::IMov(Val::Reg(Reg::RBP), Val::Reg(Reg::RSP)));
+        // Allocate stack space for parameters
+        ins.push(Instr::ISub(Val::Reg(Reg::RSP), Val::Imm((8*defn.params.len()) as i32))); 
 
-        // Allocate space for parameters
+        // Space has already been allocated for local parameters
+        // We just need to know where to access them on the stack
+        let mut keys: Vec<String> = Vec::new();
         for (i, (param_name, _)) in defn.params.iter().enumerate() {
-            let offset = allocate_space(param_name, allocs);
-            ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset), Val::Reg(Reg::RDI))); // RDI as example
-        }
+            if is_reserved_word(&param_name) {panic!("trying to bind reserved variable name: {param_name}")}
 
+            let mut name_clone = param_name.clone();
+            name_clone.push_str("LOCAL_VAR");
+            allocs.insert(name_clone.to_string(), ((i+1) as i32)*-1);
+            keys.push(name_clone.to_string());
+        }
         // Compile the body of the function
-        ins.extend(compile_to_instrs(&defn.body, allocs, label_idx));
+        ins.extend(compile_to_instrs(&defn.body, allocs, label_idx, functs, ctx));
 
         // Restore frame pointer (epilogue) and return
-        ins.push(Instr::IMov(Val::Reg(Reg::RSP), Val::Reg(Reg::RSP)));
+        ins.push(Instr::IMov(Val::Reg(Reg::RSP), Val::Reg(Reg::RBP)));
+        ins.push(Instr::Pop(Val::Reg(Reg::RBP))); // save previous caller's rbp
         ins.push(Instr::Ret);
+        for key in keys {
+            allocs.remove(&key);
+        }
     }
     ins
 }
 
 
-// ADDED: more registers to strings
+// ADDED: more registers to strings // ADDED: RBP
 fn val_to_str(v: &Val) -> String {
   match v {
       Val::Imm(n) => n.to_string(),
@@ -575,13 +620,14 @@ fn val_to_str(v: &Val) -> String {
       Val::Reg(Reg::RSP) => "rsp".to_string(),
       Val::Reg(Reg::RBX) => "rbx".to_string(),
       Val::Reg(Reg::RDI) => "rdi".to_string(),
-      Val::Reg(Reg::RSI) => "rdi".to_string(),
-      Val::Reg(Reg::RDX) => "rdi".to_string(),
-      Val::Reg(Reg::RCX) => "rdi".to_string(),
-      Val::Reg(Reg::R8) => "rdi".to_string(),
-      Val::Reg(Reg::R9) => "rdi".to_string(),
-
+      Val::Reg(Reg::RSI) => "rsi".to_string(),
+      Val::Reg(Reg::RDX) => "rdx".to_string(),
+      Val::Reg(Reg::RCX) => "rcx".to_string(),
+      Val::Reg(Reg::RBP) => "rbp".to_string(),
+      Val::Reg(Reg::R8) => "r8".to_string(),
+      Val::Reg(Reg::R9) => "r9".to_string(),
       Val::RegOffset(Reg::RSP, n) => format!("[rsp{n}]"),
+      Val::RegOffset(Reg::RBP, n) => format!("[rbp{n}]"),
       _ => panic!("not yet implemented"),
   }
 }
@@ -638,6 +684,15 @@ fn instr_to_stri(i: &Instr) -> String {
                 let str_b = val_to_str(b);
                 format!("cmovge {str_a}, {str_b}")
       }
+      // ADDED pop push
+      Instr::Pop(a) => {
+                let str_a = val_to_str(a);
+                format!("pop {str_a}")
+      }
+      Instr::Push(a) => {
+                let str_a = val_to_str(a);
+                format!("push {str_a}")
+      }
         
       Instr::Label(name) => format!{"{}:", name},
       Instr::Jmp(label) => format!("jmp {}", label),
@@ -654,20 +709,21 @@ fn instr_to_stri(i: &Instr) -> String {
 
 
 
-fn compile(prog: &Prog) -> String {
+fn compile(prog: &Prog, ctx:&HashMap<String, Type>) -> String {
   let mut allocations: HashMap<String, i32> = HashMap::new();
   let mut label_index = 0;
-  let instructions: Vec<Instr> = compile_to_instrs(e, &mut allocations, &mut label_index);
+  // let instructions: Vec<Instr> = compile_to_instrs(e, &mut allocations, &mut label_index);
   // compile function definitions
-  instructions.extend(compile_defns(&prog.functions, &mut allocations, &mut label_index));
   // compile main instructions 
-  instructions.extend(compile_to_instrs(&prog.main_expr, &mut allocations, &mut label_index));
+  let mut instructions: Vec<Instr> = compile_to_instrs(&prog.main_expr, &mut allocations, &mut label_index, &prog.functions, ctx);
+  instructions.push(Instr::Jmp("done".to_string()));
+  instructions.extend(compile_defns(&prog.functions, &mut allocations, &mut label_index, &prog.functions, ctx));
 
   let assembly: Vec<String> = instructions.iter().map(|x| instr_to_stri(x)).collect();
   assembly.join("\n")
 }
 
-fn typecheck(e: &Expr, ctx:&HashMap<String, Type>) -> Type {
+fn typecheck(e: &Expr, functs: &Vec<Defn>,  ctx:&HashMap<String, Type>) -> Type {
   match e {
     Expr::Input => {
         Type::Int
@@ -678,16 +734,22 @@ fn typecheck(e: &Expr, ctx:&HashMap<String, Type>) -> Type {
     Expr::Boolean(_) => {
         Type::Bool
     },
-    Expr::UnOp(_, e) => {
-        let e_type = typecheck(e, ctx);
-        if e_type != Type::Int {
-            panic!("type mismatch: expression must be an integer");
+    // ADDED typechecking for print
+    Expr::UnOp(op1, e) => {
+        match op1 {
+            Op1::Print => typecheck(e, functs, ctx),
+            _ => {
+                let e_type = typecheck(e, functs, ctx);
+                if e_type != Type::Int {
+                    panic!("type mismatch: expression must be an integer");
+                }
+                e_type
+            }
         }
-        e_type
-    }
+    },
     Expr::BinOp(op2,lhs, rhs) => {
-        let l_type = typecheck(lhs, ctx);
-        let r_type = typecheck(rhs, ctx);
+        let l_type = typecheck(lhs, functs, ctx);
+        let r_type = typecheck(rhs, functs, ctx);
        match op2 {
         Op2::Equal => {
             if l_type != r_type {
@@ -735,18 +797,18 @@ fn typecheck(e: &Expr, ctx:&HashMap<String, Type>) -> Type {
             if is_reserved_word(&name) { 
                 panic!("variable name is a keyword: {name}"); 
             }
-            let ty1 = typecheck(rhs, &new_ctx);
+            let ty1 = typecheck(rhs, functs,&new_ctx);
             new_ctx = new_ctx.update(name.clone(), ty1);
         }
-        typecheck(body, &new_ctx)
+        typecheck(body, functs, &new_ctx)
     },
     Expr::If(cond, then_branch, else_branch) => {
-        let cond_type = typecheck(cond, ctx);
+        let cond_type = typecheck(cond, functs, ctx);
         if cond_type != Type::Bool {
             panic!("type mismatch: condition must be boolean");
         }
-        let then_type = typecheck(then_branch, ctx);
-        let else_type = typecheck(else_branch, ctx);
+        let then_type = typecheck(then_branch, functs, ctx);
+        let else_type = typecheck(else_branch, functs,ctx);
         if then_type != else_type {
             panic!("type mismatch: branches must return the same type");
         }
@@ -754,7 +816,7 @@ fn typecheck(e: &Expr, ctx:&HashMap<String, Type>) -> Type {
     }
     Expr::Set(name, body) => {
         let name_type = ctx.get(name).unwrap().clone();
-        let body_type = typecheck(body, ctx);
+        let body_type = typecheck(body, functs, ctx);
         if name_type != body_type {
             panic!("type mismatch: set variable must have same type as set body")
         }
@@ -763,7 +825,7 @@ fn typecheck(e: &Expr, ctx:&HashMap<String, Type>) -> Type {
     Expr::Block(exps) => {
         let mut e_type: Option<Type> = None;
         for exp in exps.iter() {
-           e_type = Some(typecheck(exp, ctx));
+           e_type = Some(typecheck(exp, functs, ctx));
         }
         if e_type == None {
             panic!("block expression must contain at least one expression")
@@ -771,14 +833,31 @@ fn typecheck(e: &Expr, ctx:&HashMap<String, Type>) -> Type {
         e_type.unwrap()
     }
     Expr::RepeatUntil(body, condition) => {
-        let condition_type = typecheck(condition, ctx);
+        let condition_type = typecheck(condition, functs, ctx);
         if condition_type != Type::Bool {
             panic!("type mismatch: repeat until condition condition must be type bool");
         }
-        typecheck(body, ctx)
+        typecheck(body, functs, ctx)
     }
-    // FIX: type check for function calls
-    Expr::FunCall { name, args } => todo!(),
+    // ADDED type check for function calls
+    Expr::FunCall { name, args } => {
+        for funct in functs.iter() {
+            if *name == funct.name {
+                if args.len() != funct.params.len() {
+                    panic!("function call {} expected a different number of inputs", name);
+                }
+                for (i, arg )in args.iter().enumerate() {
+                    let arg_type = typecheck(arg, functs, ctx);
+                    let (_, expected_type) = &funct.params[i];
+                    if arg_type != *expected_type {
+                        panic!("type mismatch in arguments to function call: {}", name);
+                    }
+                }
+                return funct.return_type.clone();
+            }
+        }
+        panic!("undeclared function with name: {}", name)
+    },
   }
 }
 
@@ -793,13 +872,14 @@ fn main() -> std::io::Result<()> {
     let mut in_contents = String::new();
     in_file.read_to_string(&mut in_contents)?;
     
-
-    let expr = parse_prog(&parse(&in_contents).unwrap());
+    // ADDED need to wrap input in parenthesis to make valid SExpr as posted on piazza
+    let wrapped = format!("({})", in_contents);
+    let expr = parse_prog(&parse(&wrapped).unwrap());
     let ctx: HashMap<String, Type> = HashMap::new(); 
-    let mut label_idx = 0; 
-    let result = compile(&expr);
+    let expr_type = typecheck(&expr.main_expr, &expr.functions, &ctx);
+    let result = compile(&expr, &ctx);
 
-    //let type_flag = if expr_type == Type::Int {0} else {1};
+    let type_flag = if expr_type == Type::Int {0} else {1};
     let asm_program = format!(
         "
 section .text
@@ -808,6 +888,7 @@ extern snek_print
 global our_code_starts_here
 our_code_starts_here:
 {}
+done:
 mov rdi, rax
 mov rsi, {}
 call snek_print

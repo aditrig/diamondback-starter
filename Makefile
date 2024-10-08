@@ -15,6 +15,7 @@ tests/%.run: tests/%.s runtime/start.rs
 	ar rcs tests/lib$*.a tests/$*.o
 	rustc -L tests/ -lour_code:$* runtime/start.rs -o tests/$*.run
 
+.PRECIOUS: tests/%.s 
 .PHONY: test
 test:
 	cargo build
