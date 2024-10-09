@@ -120,6 +120,8 @@ fn is_reserved_word(s: &str) -> bool {
     reserved_words.insert("-");
     reserved_words.insert("*");
     reserved_words.insert("input");
+    reserved_words.insert("true");
+    reserved_words.insert("false");
     reserved_words.contains(s)
 }
 
@@ -128,7 +130,7 @@ fn check_duplicates(params: &Vec<(String, Type)>) {
     let mut seen = HashSet::new();
     for (name, _) in params {
         if seen.contains(name) {
-            eprintln!("Duplicate parameter name: {}", name);
+            panic!("Duplicate parameter name: {}", name);
         }
         seen.insert(name.clone());
     }
@@ -137,7 +139,7 @@ fn check_duplicates_function_names(functs: &Vec<Defn>) {
     let mut seen = HashSet::new();
     for funct in functs.iter() {
         if seen.contains(&funct.name) {
-            eprintln!("Duplicate parameter name: {}", &funct.name);
+            panic!("Duplicate parameter name: {}", funct.name);
         }
         seen.insert(funct.name.clone());
     }
@@ -213,7 +215,9 @@ fn parse_defn(s: &Sexp) -> Defn {
                 check_duplicates(&param_list); // Check for duplicate parameters
                 let ret_type = parse_type(return_type);
                 let expr_body = parse_expr(body);
-
+                if is_reserved_word(name) {
+                    panic!("trying to define function with reserved name: {}", name);
+                }
                 Defn {
                     name: name.clone(),
                     params: param_list,
@@ -321,7 +325,7 @@ fn parse_expr(s: &Sexp) -> Expr {
 fn find_max_offset(allocs: &HashMap<String, i32>) -> i32{
   let mut max_offset = 0;
   for (name, offset) in allocs.into_iter() {
-     if offset < &max_offset && !name.ends_with("LOCAL_VAR") {
+     if offset < &max_offset && !name.ends_with("ARGUMENT") {
           max_offset = *offset;
      }
   }
@@ -330,9 +334,9 @@ fn find_max_offset(allocs: &HashMap<String, i32>) -> i32{
 
 fn allocate_space(name: &str, allocs: &mut HashMap<String, i32>) -> i32{
   let offset = find_max_offset(allocs);
-  allocs.insert(name.to_string(), offset-8);
+  allocs.insert(name.to_string(), offset-1);
   // println!("allocated space at {}", offset-8);
-  offset-8
+  offset-1
 }
 
 // ADDED: binops for > < >= <= =, and if case
@@ -344,12 +348,12 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
       Expr::Boolean(b) => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(if *b { 1} else { 0 }))],
       Expr::Input => vec![Instr::IMov(Val::Reg(Reg::RAX), Val::Reg(Reg::RDI))],
       Expr::Id(name) => match allocs.get(name) {
-            Some(&offset) =>  vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset))],
+            Some(&offset) =>  vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, 8*offset))],
             None => {
                 let mut clone = name.clone();
-                clone.push_str("LOCAL_VAR");
+                clone.push_str("ARGUMENT");
                 match allocs.get(&clone) {
-                    Some(&offset) =>  vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, offset*8))],
+                    Some(&offset) =>  vec![Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, (1+offset)*8))],
                     None => panic!("Unbound variable identifier {name}")
                 }
             }
@@ -377,36 +381,38 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         let type_e = typecheck(e, functs, ctx);
         let type_flag = if type_e == Type::Int {0} else {1};
         let mut ins = compile_to_instrs(e, allocs, label_idx, functs, ctx); 
+        ins.push(Instr::Push(Val::Reg(Reg::RDI)));
         ins.push(Instr::IMov(Val::Reg(Reg::RDI), Val::Reg(Reg::RAX))); 
         ins.push(Instr::IMov(Val::Reg(Reg::RSI), Val::Imm(type_flag))); 
         ins.push(Instr::Call("snek_print".to_string())); 
+        ins.push(Instr::Pop(Val::Reg(Reg::RDI)));
         ins
         },
     
       Expr::BinOp(Op2::Plus, l, r) => {
           let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
           let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
-          ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+          ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, offset_left*8), Val::Reg(Reg::RAX)));
           ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
-          ins.push(Instr::IAdd(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
+          ins.push(Instr::IAdd(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, offset_left*8)));
           ins.push(Instr::Jo("error".to_string()));
           ins
       },
       Expr::BinOp(Op2::Minus, l, r) => {
           let mut ins = compile_to_instrs(r, allocs,label_idx, functs, ctx);
           let offset_right = allocate_space(&format!("temp{}", allocs.len()), allocs);
-          ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_right), Val::Reg(Reg::RAX)));
+          ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, offset_right*8), Val::Reg(Reg::RAX)));
           ins.extend(compile_to_instrs(l, allocs,label_idx, functs, ctx));
-          ins.push(Instr::ISub(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_right)));
+          ins.push(Instr::ISub(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, 8*offset_right)));
           ins.push(Instr::Jo("error".to_string()));
           ins
       },
       Expr::BinOp(Op2::Times, l, r) => {
           let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
           let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
-          ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+          ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
           ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
-          ins.push(Instr::IMul(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
+          ins.push(Instr::IMul(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, 8*offset_left)));
           ins.push(Instr::Jo("error".to_string()));
           ins
       },
@@ -418,7 +424,7 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
             ins.extend(compile_to_instrs(e, allocs,label_idx, functs, ctx));
             keys.push(name.to_string());
             let offset = allocate_space(name, allocs);
-            ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset), Val::Reg(Reg::RAX)));
+            ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset), Val::Reg(Reg::RAX)));
         }
         ins.extend(compile_to_instrs(body, allocs,label_idx, functs, ctx));
         for key in keys {
@@ -429,9 +435,9 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
       Expr::BinOp(Op2::Equal, l, r) => {
         let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
-        ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
-        ins.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
+        ins.push(Instr::ICmp(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, 8*offset_left)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   //set rax to 0 (false)
         ins.push(Instr::Cmove(Val::Reg(Reg::RAX), Val::Reg(Reg::RBX)));  // move 1 into rax if less than
@@ -441,9 +447,9 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     Expr::BinOp(Op2::Less, l, r) => {
         let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
-        ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
-        ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::ICmp(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   //set rax to 0 (false)
         ins.push(Instr::Cmovl(Val::Reg(Reg::RAX), Val::Reg(Reg::RBX)));  // move 1 into rax if less than
@@ -454,9 +460,9 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     Expr::BinOp(Op2::Greater, l, r) => {
         let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
-        ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
-        ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::ICmp(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   //set rax to 0 (false)
         ins.push(Instr::Cmovg(Val::Reg(Reg::RAX), Val::Reg(Reg::RBX)));  // move 1 into rax if greater than
@@ -466,9 +472,9 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     Expr::BinOp(Op2::LessEqual, l, r) => {
         let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
-        ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
-        ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::ICmp(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   // set rax to 0 (false)
         ins.push(Instr::Cmovle(Val::Reg(Reg::RAX), Val::Reg(Reg::RBX)));  // move 1 into rax if less or equal
@@ -478,9 +484,9 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     Expr::BinOp(Op2::GreaterEqual, l, r) => {
         let mut ins = compile_to_instrs(l, allocs,label_idx, functs, ctx);
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs);
-        ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.extend(compile_to_instrs(r, allocs,label_idx, functs, ctx));
-        ins.push(Instr::ICmp(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX)));
+        ins.push(Instr::ICmp(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX)));
         ins.push(Instr::IMov(Val::Reg(Reg::RBX), Val::Imm(1))); // set rbx to 1 (true)
         ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::Imm(0)));   // set rax to 0 (false)
         ins.push(Instr::Cmovge(Val::Reg(Reg::RAX), Val::Reg(Reg::RBX)));  // move 1 into rax if greater or equal
@@ -498,7 +504,7 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
     Expr::If(cond, then_branch, else_branch) => {
         let mut ins = compile_to_instrs(cond, allocs, label_idx, functs, ctx); 
         let offset_left = allocate_space(&format!("temp{}", allocs.len()), allocs); 
-        ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX))); 
+        ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX))); 
         // ins.extend(compile_to_instrs(then_branch, allocs, label_idx)); 
     
         // FIX: need to add indicies to else and end because of nested if statements 
@@ -526,7 +532,7 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
             if !(allocs.contains_key(name)) {panic!("trying to bind undeclared variable {name}")}
             let mut ins = compile_to_instrs(body, allocs,label_idx, functs, ctx); 
             let offset = allocs.get(name).unwrap();
-            ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, *offset), Val::Reg(Reg::RAX)));
+            ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset), Val::Reg(Reg::RAX)));
             ins
       },
       
@@ -543,7 +549,7 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         // {e}
         ins.extend(compile_to_instrs(body, allocs,label_idx, functs, ctx)); 
         // move the updated values into rsp
-        ins.push(Instr::IMov(Val::RegOffset(Reg::RSP, offset_left), Val::Reg(Reg::RAX))); 
+        ins.push(Instr::IMov(Val::RegOffset(Reg::RBP, 8*offset_left), Val::Reg(Reg::RAX))); 
         // {condition}
         ins.extend(compile_to_instrs(condition, allocs,label_idx, functs, ctx)); 
         // compare rax (the condition) with the current value
@@ -553,7 +559,7 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
         // jump to the start if the condition hasn't been met yet
         ins.push(Instr::Jne(loop_label));
         // if condition is met, move result to rax
-        ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RSP, offset_left)));
+        ins.push(Instr::IMov(Val::Reg(Reg::RAX), Val::RegOffset(Reg::RBP, 8*offset_left)));
         // add the end label to the end of the loop - idk if this is needed
         // ins.push(Instr::Label(end_label)); // i don't think this is needed
         ins
@@ -562,12 +568,26 @@ fn compile_to_instrs(e: &Expr, allocs: &mut HashMap<String, i32>, label_idx: &mu
 
     Expr::FunCall { name, args } => {
         let mut ins: Vec<Instr> = Vec::new();
+        // push caller save arguments
+        ins.push(Instr::Push(Val::Reg(Reg::R9)));
+        ins.push(Instr::Push(Val::Reg(Reg::R8)));
+        ins.push(Instr::Push(Val::Reg(Reg::RCX)));
+        ins.push(Instr::Push(Val::Reg(Reg::RDX)));
+        ins.push(Instr::Push(Val::Reg(Reg::RSI)));
+        ins.push(Instr::Push(Val::Reg(Reg::RDI)));
         for arg in args.iter().rev() {
             ins.extend(compile_to_instrs(arg, allocs, label_idx, functs, ctx));
-            ins.push(Instr::Push(Val::Reg(Reg::RAX))); // save previous caller's rbp
+            ins.push(Instr::Push(Val::Reg(Reg::RAX))); // push function arguments onto the stack in reverse order
         }
         ins.push(Instr::Call(name.to_string()));
-        ins.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm((8*args.len()) as i32)));
+        // restore stack
+        ins.push(Instr::IAdd(Val::Reg(Reg::RSP), Val::Imm((8*(args.len())) as i32)));
+        ins.push(Instr::Pop(Val::Reg(Reg::RDI)));
+        ins.push(Instr::Pop(Val::Reg(Reg::RSI)));
+        ins.push(Instr::Pop(Val::Reg(Reg::RDX)));
+        ins.push(Instr::Pop(Val::Reg(Reg::RCX)));
+        ins.push(Instr::Pop(Val::Reg(Reg::R8)));
+        ins.push(Instr::Pop(Val::Reg(Reg::R9)));
         ins
     }
     }
@@ -583,18 +603,18 @@ fn compile_defns(defns: &[Defn], allocs: &mut HashMap<String, i32>, label_idx: &
         // Set up frame pointer (prologue)
         ins.push(Instr::Push(Val::Reg(Reg::RBP))); // save previous caller's rbp
         ins.push(Instr::IMov(Val::Reg(Reg::RBP), Val::Reg(Reg::RSP)));
-        // Allocate stack space for parameters
-        ins.push(Instr::ISub(Val::Reg(Reg::RSP), Val::Imm((8*defn.params.len()) as i32))); 
+        // Allocate stack space for parameters, we don't need to do this as it happens when we compile the body
+        // ins.push(Instr::ISub(Val::Reg(Reg::RSP), Val::Imm((8*defn.params.len()) as i32))); 
 
         // Space has already been allocated for local parameters
         // We just need to know where to access them on the stack
         let mut keys: Vec<String> = Vec::new();
-        for (i, (param_name, _)) in defn.params.iter().enumerate() {
+        for (i, (param_name, _)) in defn.params.iter().rev().enumerate() {
             if is_reserved_word(&param_name) {panic!("trying to bind reserved variable name: {param_name}")}
 
             let mut name_clone = param_name.clone();
-            name_clone.push_str("LOCAL_VAR");
-            allocs.insert(name_clone.to_string(), ((i+1) as i32)*-1);
+            name_clone.push_str("ARGUMENT");
+            allocs.insert(name_clone.to_string(), (i+1) as i32);
             keys.push(name_clone.to_string());
         }
         // Compile the body of the function
@@ -626,8 +646,8 @@ fn val_to_str(v: &Val) -> String {
       Val::Reg(Reg::RBP) => "rbp".to_string(),
       Val::Reg(Reg::R8) => "r8".to_string(),
       Val::Reg(Reg::R9) => "r9".to_string(),
-      Val::RegOffset(Reg::RSP, n) => format!("[rsp{n}]"),
-      Val::RegOffset(Reg::RBP, n) => format!("[rbp{n}]"),
+      Val::RegOffset(Reg::RSP, n) => if *n > 0 {format!("[rsp+{n}]")} else {format!("[rsp{n}]")},
+      Val::RegOffset(Reg::RBP, n) =>if *n > 0 {format!("[rbp+{n}]")} else {format!("[rbp{n}]")},
       _ => panic!("not yet implemented"),
   }
 }
