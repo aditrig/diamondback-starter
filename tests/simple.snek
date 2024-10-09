@@ -1,0 +1,10 @@
+(fun one ((n int)) bool
+  (if (> n 1)
+      true
+      false
+      )
+)
+(block
+  (print input)
+  (print (one input))
+)

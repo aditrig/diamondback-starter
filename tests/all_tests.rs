@@ -29,5 +29,10 @@ static_error_tests! {
         name: duplicate_params,
         file: "duplicate_params.snek",
         expected: "",
+    },
+    {
+        name: reserved,
+        file: "reserved.snek",
+        expected: "",
     }
 }
